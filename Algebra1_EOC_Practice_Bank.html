@@ -42,11 +42,20 @@
   .chip.active { background: #1a3a5c; color: #fff; border-color: #1a3a5c; }
   .chip:hover { border-color: #1a3a5c; }
 
-  #nav { background: #fff; border-bottom: 1px solid #dde3ea; padding: 12px; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; }
+  #nav { background: #fff; border-bottom: 1px solid #dde3ea; padding: 12px; display: flex; flex-wrap: wrap; gap: 5px; justify-content: center; max-height: 220px; overflow-y: auto; }
   #nav button { width: 34px; height: 34px; border-radius: 6px; border: 1px solid #bbb; background: #f7f9fc; cursor: pointer; font-size: .78em; }
   #nav button.ok { background: #27ae60; color: #fff; border-color: #27ae60; }
   #nav button.wr { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+  #nav button.current { outline: 3px solid #f39c12; outline-offset: 1px; }
   #nav button.hidden, .card.hidden { display: none; }
+
+  #study-carousel { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; background: #fff; border-bottom: 1px solid #dde3ea; max-width: 820px; margin: 0 auto; position: sticky; top: 0; z-index: 5; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+  #study-carousel button { padding: 8px 18px; border-radius: 6px; border: 1px solid #1a3a5c; background: #f7f9fc; color: #1a3a5c; cursor: pointer; font-size: .9em; font-weight: 600; transition: all .15s; }
+  #study-carousel button:hover:not(:disabled) { background: #1a3a5c; color: #fff; }
+  #study-carousel button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #study-position { font-size: .95em; color: #1a3a5c; flex: 1; text-align: center; }
+  #study-position strong { font-weight: 700; }
+  #study-empty { padding: 60px 20px; text-align: center; color: #7a8595; max-width: 820px; margin: 24px auto; background: #fff; border-radius: 12px; border: 1px dashed #c2ccd9; }
 
   #qbox, #test-qbox { max-width: 820px; margin: 24px auto; padding: 0 14px 60px; }
 
@@ -200,15 +209,17 @@
     <div class="ic">Incorrect: <span id="sw">0</span></div>
   </div>
   <div id="ctrls">
-    <button data-act="expand-hints">Show All Hints</button>
-    <button data-act="collapse-all">Hide All Hints/Walkthroughs</button>
-    <button data-act="show-walks">Show All Walkthroughs</button>
     <button data-act="reset-all">Reset All Answers</button>
     <button data-act="print">🖨 Print Answer Key</button>
     <button data-act="clear-progress" class="danger">⚠ Clear Saved Progress</button>
   </div>
   <div id="filter-chips"></div>
   <div id="nav"></div>
+  <div id="study-carousel">
+    <button id="study-prev" aria-label="Previous question">← Prev</button>
+    <span id="study-position">Question 1 of 420</span>
+    <button id="study-next" aria-label="Next question">Next →</button>
+  </div>
   <div id="qbox"></div>
   <div id="study-summary" class="summary hidden"></div>
 </section>
@@ -815,6 +826,7 @@ const App = {
   prefs: {
     lastFilter: 'all',
     lastTab: 'study',
+    studyIdx: 0,
     testBuilder: { topics: [], n: 10, order: 'random', mode: 'practice', timer: 'down', timerMin: 20 }
   },
 
@@ -843,7 +855,7 @@ const App = {
   clearAll() {
     localStorage.removeItem(Store.KEY);
     this.state = { study: {}, flags: {}, notes: {}, history: [], test: null };
-    this.prefs = { lastFilter: 'all', lastTab: 'study',
+    this.prefs = { lastFilter: 'all', lastTab: 'study', studyIdx: 0,
       testBuilder: { topics: [], n: 10, order: 'random', mode: 'practice', timer: 'down', timerMin: 20 } };
   }
 };
@@ -995,9 +1007,7 @@ function makeCard(q, i, opts) {
    STUDY VIEW
    ============================================================ */
 function buildStudy() {
-  const box = document.getElementById('qbox');
   const nav = document.getElementById('nav');
-  clearNode(box);
   clearNode(nav);
 
   Q.forEach((q, i) => {
@@ -1005,28 +1015,133 @@ function buildStudy() {
     nb.id = 'nv' + i;
     nb.textContent = q.n;
     nb.dataset.topic = topicGroupOf(q);
-    nb.addEventListener('click', () => document.getElementById('q' + i).scrollIntoView({behavior: 'smooth'}));
+    nb.addEventListener('click', () => showQuestion(i));
     const s = App.state.study[q.n];
     if (s && s.answered) nb.classList.add(s.correct ? 'ok' : 'wr');
     nav.appendChild(nb);
-
-    box.appendChild(makeCard(q, i, { context: 'study' }));
   });
 
-  // Hydrate per-card state (answers + scratchpad notes)
-  Q.forEach((q, i) => {
-    const s = App.state.study[q.n];
-    if (s && s.answered) restoreAnsweredCard(i, q, s);
-    const note = App.state.notes[q.n];
-    if (note) {
-      const ta = document.querySelector('textarea[data-q="' + q.n + '"][data-context="study"]');
-      if (ta) ta.value = note;
-    }
-  });
-
-  renderFormulas(box);
+  // Render only the current carousel question
+  let idx = App.prefs.studyIdx;
+  if (typeof idx !== 'number' || idx < 0 || idx >= Q.length) idx = 0;
+  showQuestion(idx, { skipScroll: true });
   updateStats();
   checkStudyComplete();
+}
+
+function showQuestion(i, opts) {
+  opts = opts || {};
+  if (i < 0 || i >= Q.length) i = 0;
+
+  // If current filter excludes this question, jump to first matching
+  if (!filterMatches(Q[i], App.prefs.lastFilter)) {
+    const first = Q.findIndex(q => filterMatches(q, App.prefs.lastFilter));
+    if (first < 0) {
+      renderEmptyStudyState();
+      return;
+    }
+    i = first;
+  }
+
+  App.prefs.studyIdx = i;
+
+  const box = document.getElementById('qbox');
+  clearNode(box);
+  const q = Q[i];
+  const card = makeCard(q, i, { context: 'study' });
+  box.appendChild(card);
+
+  // Hydrate state for this card
+  const s = App.state.study[q.n];
+  if (s && s.answered) restoreAnsweredCard(i, q, s);
+  const note = App.state.notes[q.n];
+  if (note) {
+    const ta = card.querySelector('textarea[data-q="' + q.n + '"][data-context="study"]');
+    if (ta) ta.value = note;
+  }
+
+  renderFormulas(card);
+
+  // Update nav highlight
+  document.querySelectorAll('#nav button').forEach(b => b.classList.remove('current'));
+  const nb = document.getElementById('nv' + i);
+  if (nb) {
+    nb.classList.add('current');
+    // Scroll the nav row to make the current button visible
+    nb.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }
+
+  updateCarouselPosition(i);
+
+  if (!opts.skipScroll) {
+    // Scroll the carousel bar into view (which puts the card just below it)
+    const cb = document.getElementById('study-carousel');
+    if (cb) cb.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  App.persist();
+}
+
+function renderEmptyStudyState() {
+  const box = document.getElementById('qbox');
+  clearNode(box);
+  const empty = document.createElement('div');
+  empty.id = 'study-empty';
+  empty.textContent = 'No questions match the current filter. Pick a different topic chip above.';
+  box.appendChild(empty);
+  document.querySelectorAll('#nav button').forEach(b => b.classList.remove('current'));
+  updateCarouselPosition(-1);
+}
+
+function nextQuestion() {
+  const filtered = filteredIndexList();
+  if (filtered.length === 0) return;
+  const cur = App.prefs.studyIdx;
+  const pos = filtered.indexOf(cur);
+  const next = pos === -1 ? filtered[0] : filtered[(pos + 1) % filtered.length];
+  showQuestion(next);
+}
+
+function prevQuestion() {
+  const filtered = filteredIndexList();
+  if (filtered.length === 0) return;
+  const cur = App.prefs.studyIdx;
+  const pos = filtered.indexOf(cur);
+  const prev = pos === -1 ? filtered[0] : filtered[(pos - 1 + filtered.length) % filtered.length];
+  showQuestion(prev);
+}
+
+function filteredIndexList() {
+  const out = [];
+  for (let i = 0; i < Q.length; i++) {
+    if (filterMatches(Q[i], App.prefs.lastFilter)) out.push(i);
+  }
+  return out;
+}
+
+function updateCarouselPosition(i) {
+  const filtered = filteredIndexList();
+  const total = filtered.length;
+  const display = document.getElementById('study-position');
+  const prevBtn = document.getElementById('study-prev');
+  const nextBtn = document.getElementById('study-next');
+  if (i < 0 || total === 0) {
+    if (display) display.textContent = 'No questions match filter';
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    return;
+  }
+  const pos = filtered.indexOf(i);
+  const isFiltered = total < Q.length;
+  if (display) {
+    let html = 'Question <strong>' + (pos + 1) + '</strong> of <strong>' + total + '</strong>';
+    if (isFiltered) {
+      html += ' <span style="font-size:.85em;color:#7a8595;">(Bank #' + Q[i].n + ')</span>';
+    }
+    setFrag(display, html);
+  }
+  if (prevBtn) prevBtn.disabled = false;
+  if (nextBtn) nextBtn.disabled = false;
 }
 
 function restoreAnsweredCard(i, q, s) {
@@ -1136,12 +1251,20 @@ function updateStats() {
   document.getElementById('bar').style.width = (a / Q.length * 100) + '%';
 }
 
-function expandHints()   { Q.forEach((_, i) => document.getElementById('h' + i).style.display = 'block'); }
-function collapseAll()   { Q.forEach((_, i) => { document.getElementById('h' + i).style.display = 'none'; document.getElementById('w' + i).style.display = 'none'; }); }
-function showAllWalks()  { Q.forEach((_, i) => document.getElementById('w' + i).style.display = 'block'); }
-function resetAll()      {
+function resetAll() {
   if (!confirm('Reset all answers? (Scratchpad notes and saved flags are kept.)')) return;
-  Q.forEach((_, i) => resetStudy(i));
+  App.state.study = {};
+  // Clear all nav-button color classes
+  Q.forEach((_, i) => {
+    const nb = document.getElementById('nv' + i);
+    if (nb) nb.className = nb.classList.contains('current') ? 'current' : '';
+  });
+  // Re-render the currently displayed question with cleared state
+  showQuestion(App.prefs.studyIdx, { skipScroll: true });
+  updateStats();
+  checkStudyComplete();
+  refreshFilterChips();
+  App.persist();
 }
 
 /* ============================================================
@@ -1178,14 +1301,22 @@ function applyFilter(key) {
     c.classList.toggle('active', c.dataset.filter === key);
   });
   Q.forEach((q, i) => {
-    const card = document.getElementById('q' + i);
     const nb = document.getElementById('nv' + i);
     const match = filterMatches(q, key);
-    if (card) card.classList.toggle('hidden', !match);
-    if (nb)   nb.classList.toggle('hidden', !match);
+    if (nb) nb.classList.toggle('hidden', !match);
   });
   App.prefs.lastFilter = key;
   App.persist();
+
+  // If current question doesn't match new filter, jump to first matching (or empty)
+  const cur = App.prefs.studyIdx;
+  if (!Q[cur] || !filterMatches(Q[cur], key)) {
+    const first = Q.findIndex(q => filterMatches(q, key));
+    if (first >= 0) showQuestion(first, { skipScroll: true });
+    else renderEmptyStudyState();
+  } else {
+    updateCarouselPosition(cur);
+  }
 }
 
 function filterMatches(q, key) {
@@ -1763,9 +1894,6 @@ function wireGlobalDelegation() {
 
     if (btn.parentElement && btn.parentElement.id === 'ctrls') {
       switch (act) {
-        case 'expand-hints': expandHints(); break;
-        case 'collapse-all': collapseAll(); break;
-        case 'show-walks':   showAllWalks(); break;
         case 'reset-all':    resetAll(); break;
         case 'print':        printAnswerKey(); break;
         case 'clear-progress':
@@ -1846,6 +1974,19 @@ function wireGlobalDelegation() {
   document.getElementById('test-submit').addEventListener('click', () => {
     if (!confirm('Submit the test now?')) return;
     submitTest(false);
+  });
+
+  // Carousel prev/next
+  document.getElementById('study-prev').addEventListener('click', prevQuestion);
+  document.getElementById('study-next').addEventListener('click', nextQuestion);
+
+  // Arrow-key shortcuts for carousel (only on Study tab, not while typing)
+  document.addEventListener('keydown', e => {
+    if (App.prefs.lastTab !== 'study') return;
+    if (e.target && e.target.matches && e.target.matches('input, textarea, select, [contenteditable]')) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); prevQuestion(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); nextQuestion(); }
   });
 }
 
